@@ -2,11 +2,18 @@ package com.github.m1cbppg.sqlexplainer.editor
 
 import com.github.m1cbppg.sqlexplainer.icons.PluginIcons
 import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.editor.event.EditorFactoryEvent
+import com.intellij.openapi.editor.event.*
 import com.intellij.openapi.editor.event.EditorFactoryListener
 import com.intellij.openapi.editor.event.SelectionEvent
 import com.intellij.openapi.editor.event.SelectionListener
+import com.intellij.openapi.editor.event.EditorMouseEventArea
+import com.intellij.openapi.editor.event.EditorMouseListener
+import com.intellij.openapi.editor.event.EditorMouseEvent
+import com.intellij.openapi.editor.event.EditorMouseMotionListener
 import com.intellij.openapi.util.Key
+import com.intellij.codeInsight.hint.HintManager
+import com.intellij.psi.PsiDocumentManager
+import com.github.m1cbppg.sqlexplainer.sql.SqlSelectionAnalyzer
 
 /**
  * Attaches a selection listener to each editor and shows a block inlay icon
@@ -27,6 +34,48 @@ class SelectionIconEditorListener : EditorFactoryListener {
         editor.selectionModel.addSelectionListener(listener)
         editor.putUserData(SELECTION_LISTENER_KEY, listener)
 
+        // Mouse listener for click handling on the inlay icon
+        val mouseListener = object : EditorMouseListener {
+            override fun mouseClicked(event: EditorMouseEvent) {
+                if (event.area != EditorMouseEventArea.EDITING_AREA) return
+                if (event.editor != editor) return
+                val inlay = editor.getUserData(INLAY_KEY) ?: return
+
+                val isHit = when {
+                    event.inlay == inlay -> true
+                    else -> inlay.bounds?.contains(event.mouseEvent.point) == true
+                }
+                if (!isHit) return
+
+                val project = editor.project ?: return
+                val psiFile = PsiDocumentManager.getInstance(project).getPsiFile(editor.document) ?: return
+
+                val result = SqlSelectionAnalyzer.analyze(editor, psiFile)
+                val message = if (result.isSql) {
+                    "检测到 SQL 片段：" + result.reason
+                } else {
+                    "未检测到 SQL 相关内容：" + result.reason
+                }
+                HintManager.getInstance().showInformationHint(editor, message)
+            }
+        }
+        editor.addEditorMouseListener(mouseListener)
+        editor.putUserData(MOUSE_LISTENER_KEY, mouseListener)
+
+        // Optional: change cursor to hand when hovering over the inlay
+        val motionListener = object : EditorMouseMotionListener {
+            override fun mouseMoved(e: EditorMouseEvent) {
+                if (e.editor != editor) return
+                val inlay = editor.getUserData(INLAY_KEY)
+                val over = inlay != null && (e.inlay == inlay || inlay.bounds?.contains(e.mouseEvent.point) == true)
+                val comp = editor.contentComponent
+                comp.cursor = if (over) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+                else java.awt.Cursor.getDefaultCursor()
+            }
+        }
+        editor.addEditorMouseMotionListener(motionListener)
+        editor.putUserData(MOUSE_MOTION_LISTENER_KEY, motionListener)
+
         // Initialize state in case selection already exists
         updateInlayForSelection(editor)
 
@@ -38,6 +87,14 @@ class SelectionIconEditorListener : EditorFactoryListener {
         editor.getUserData(SELECTION_LISTENER_KEY)?.let {
             editor.selectionModel.removeSelectionListener(it)
             editor.putUserData(SELECTION_LISTENER_KEY, null)
+        }
+        editor.getUserData(MOUSE_LISTENER_KEY)?.let {
+            editor.removeEditorMouseListener(it)
+            editor.putUserData(MOUSE_LISTENER_KEY, null)
+        }
+        editor.getUserData(MOUSE_MOTION_LISTENER_KEY)?.let {
+            editor.removeEditorMouseMotionListener(it)
+            editor.putUserData(MOUSE_MOTION_LISTENER_KEY, null)
         }
         removeExistingInlay(editor)
     }
@@ -90,5 +147,7 @@ class SelectionIconEditorListener : EditorFactoryListener {
     companion object {
         private val INLAY_KEY = Key.create<com.intellij.openapi.editor.Inlay<*>>("sql-explainer.selection-inlay")
         private val SELECTION_LISTENER_KEY = Key.create<SelectionListener>("sql-explainer.selection-listener")
+        private val MOUSE_LISTENER_KEY = Key.create<EditorMouseListener>("sql-explainer.mouse-listener")
+        private val MOUSE_MOTION_LISTENER_KEY = Key.create<EditorMouseMotionListener>("sql-explainer.mouse-motion-listener")
     }
 }
