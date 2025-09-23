@@ -1,25 +1,26 @@
 package com.github.m1cbppg.sqlexplainer.editor
 
 import com.github.m1cbppg.sqlexplainer.icons.PluginIcons
+import com.github.m1cbppg.sqlexplainer.sql.SqlSelectionAnalyzer
+import com.intellij.codeInsight.hint.HintManager
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.editor.event.*
+import com.intellij.openapi.editor.event.EditorFactoryEvent
 import com.intellij.openapi.editor.event.EditorFactoryListener
 import com.intellij.openapi.editor.event.SelectionEvent
 import com.intellij.openapi.editor.event.SelectionListener
-import com.intellij.openapi.editor.event.EditorMouseEventArea
-import com.intellij.openapi.editor.event.EditorMouseListener
-import com.intellij.openapi.editor.event.EditorMouseEvent
-import com.intellij.openapi.editor.event.EditorMouseMotionListener
+import com.intellij.openapi.editor.markup.GutterIconRenderer
+import com.intellij.openapi.editor.markup.HighlighterLayer
+import com.intellij.openapi.editor.markup.RangeHighlighter
+import com.intellij.openapi.editor.markup.TextAttributes
 import com.intellij.openapi.util.Key
-import com.intellij.codeInsight.hint.HintManager
 import com.intellij.psi.PsiDocumentManager
-import com.github.m1cbppg.sqlexplainer.sql.SqlSelectionAnalyzer
 
 /**
- * Attaches a selection listener to each editor and shows a block inlay icon
- * above the first line of the current selection. The inlay is placed in the
- * editor content area (not the gutter) to avoid conflicts with other plugins
- * like GitHub Copilot that use gutter icons.
+ * Attaches a selection listener to each editor and shows a gutter icon on the
+ * first line of the current selection. Clicking the icon triggers local SQL
+ * detection for the selected text and displays a hint with the result.
  */
 class SelectionIconEditorListener : EditorFactoryListener {
 
@@ -34,48 +35,6 @@ class SelectionIconEditorListener : EditorFactoryListener {
         editor.selectionModel.addSelectionListener(listener)
         editor.putUserData(SELECTION_LISTENER_KEY, listener)
 
-        // Mouse listener for click handling on the inlay icon
-        val mouseListener = object : EditorMouseListener {
-            override fun mouseClicked(event: EditorMouseEvent) {
-                if (event.area != EditorMouseEventArea.EDITING_AREA) return
-                if (event.editor != editor) return
-                val inlay = editor.getUserData(INLAY_KEY) ?: return
-
-                val isHit = when {
-                    event.inlay == inlay -> true
-                    else -> inlay.bounds?.contains(event.mouseEvent.point) == true
-                }
-                if (!isHit) return
-
-                val project = editor.project ?: return
-                val psiFile = PsiDocumentManager.getInstance(project).getPsiFile(editor.document) ?: return
-
-                val result = SqlSelectionAnalyzer.analyze(editor, psiFile)
-                val message = if (result.isSql) {
-                    "检测到 SQL 片段：" + result.reason
-                } else {
-                    "未检测到 SQL 相关内容：" + result.reason
-                }
-                HintManager.getInstance().showInformationHint(editor, message)
-            }
-        }
-        editor.addEditorMouseListener(mouseListener)
-        editor.putUserData(MOUSE_LISTENER_KEY, mouseListener)
-
-        // Optional: change cursor to hand when hovering over the inlay
-        val motionListener = object : EditorMouseMotionListener {
-            override fun mouseMoved(e: EditorMouseEvent) {
-                if (e.editor != editor) return
-                val inlay = editor.getUserData(INLAY_KEY)
-                val over = inlay != null && (e.inlay == inlay || inlay.bounds?.contains(e.mouseEvent.point) == true)
-                val comp = editor.contentComponent
-                comp.cursor = if (over) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
-                else java.awt.Cursor.getDefaultCursor()
-            }
-        }
-        editor.addEditorMouseMotionListener(motionListener)
-        editor.putUserData(MOUSE_MOTION_LISTENER_KEY, motionListener)
-
         // Initialize state in case selection already exists
         updateInlayForSelection(editor)
 
@@ -88,15 +47,7 @@ class SelectionIconEditorListener : EditorFactoryListener {
             editor.selectionModel.removeSelectionListener(it)
             editor.putUserData(SELECTION_LISTENER_KEY, null)
         }
-        editor.getUserData(MOUSE_LISTENER_KEY)?.let {
-            editor.removeEditorMouseListener(it)
-            editor.putUserData(MOUSE_LISTENER_KEY, null)
-        }
-        editor.getUserData(MOUSE_MOTION_LISTENER_KEY)?.let {
-            editor.removeEditorMouseMotionListener(it)
-            editor.putUserData(MOUSE_MOTION_LISTENER_KEY, null)
-        }
-        removeExistingInlay(editor)
+        removeExistingHighlighter(editor)
     }
 
     private fun updateInlayForSelection(editor: Editor) {
@@ -104,50 +55,63 @@ class SelectionIconEditorListener : EditorFactoryListener {
         val document = editor.document
 
         if (!selectionModel.hasSelection()) {
-            removeExistingInlay(editor)
+            removeExistingHighlighter(editor)
             return
         }
 
         val startOffset = selectionModel.selectionStart.coerceAtMost(document.textLength)
         val line = document.getLineNumber(startOffset)
-        val lineStartOffset = document.getLineStartOffset(line)
-
-        val existing = editor.getUserData(INLAY_KEY)
-        if (existing != null && existing.isValid && existing.offset == lineStartOffset) {
-            // Already correct
-            return
+        val existing = editor.getUserData(HIGHLIGHTER_KEY)
+        if (existing != null && existing.isValid) {
+            val existingLine = document.getLineNumber(existing.startOffset)
+            if (existingLine == line) {
+                return
+            }
         }
 
-        removeExistingInlay(editor)
+        removeExistingHighlighter(editor)
 
-        val renderer = SelectionIconRenderer(PluginIcons.selection)
-
-        // Place a block inlay above the line start inside the editor content area.
-        val inlay = editor.inlayModel.addBlockElement(
-            lineStartOffset,
-            /* showAbove = */ true,
-            /* relatesToPrecedingText = */ true,
-            /* priority = */ 0,
-            renderer
+        val highlighter = editor.markupModel.addLineHighlighter(
+            line,
+            HighlighterLayer.ADDITIONAL_SYNTAX,
+            null as TextAttributes?
         )
-
-        if (inlay != null) {
-            editor.putUserData(INLAY_KEY, inlay)
+        if (highlighter != null) {
+            highlighter.gutterIconRenderer = object : GutterIconRenderer() {
+                override fun getIcon() = PluginIcons.selection
+                override fun getAlignment() = Alignment.LEFT
+                override fun getTooltipText(): String = "检测选中文本是否为 SQL"
+                override fun isNavigateAction(): Boolean = true
+                override fun getClickAction(): com.intellij.openapi.actionSystem.AnAction? = object : AnAction("Analyze SQL") {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        val project = editor.project ?: return
+                        val psiFile = PsiDocumentManager.getInstance(project).getPsiFile(editor.document) ?: return
+                        val result = SqlSelectionAnalyzer.analyze(editor, psiFile)
+                        val message = if (result.isSql) {
+                            "检测到 SQL 片段：" + result.reason
+                        } else {
+                            "未检测到 SQL 相关内容：" + result.reason
+                        }
+                        HintManager.getInstance().showInformationHint(editor, message)
+                    }
+                }
+                override fun equals(other: Any?): Boolean = other === this
+                override fun hashCode(): Int = System.identityHashCode(this)
+            }
+            editor.putUserData(HIGHLIGHTER_KEY, highlighter)
         }
     }
 
-    private fun removeExistingInlay(editor: Editor) {
-        val existing = editor.getUserData(INLAY_KEY)
+    private fun removeExistingHighlighter(editor: Editor) {
+        val existing = editor.getUserData(HIGHLIGHTER_KEY)
         if (existing != null && existing.isValid) {
             existing.dispose()
         }
-        editor.putUserData(INLAY_KEY, null)
+        editor.putUserData(HIGHLIGHTER_KEY, null)
     }
 
     companion object {
-        private val INLAY_KEY = Key.create<com.intellij.openapi.editor.Inlay<*>>("sql-explainer.selection-inlay")
         private val SELECTION_LISTENER_KEY = Key.create<SelectionListener>("sql-explainer.selection-listener")
-        private val MOUSE_LISTENER_KEY = Key.create<EditorMouseListener>("sql-explainer.mouse-listener")
-        private val MOUSE_MOTION_LISTENER_KEY = Key.create<EditorMouseMotionListener>("sql-explainer.mouse-motion-listener")
+        private val HIGHLIGHTER_KEY = Key.create<RangeHighlighter>("sql-explainer.selection-gutter-highlighter")
     }
 }
