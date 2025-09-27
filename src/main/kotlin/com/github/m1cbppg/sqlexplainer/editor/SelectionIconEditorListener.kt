@@ -2,6 +2,7 @@ package com.github.m1cbppg.sqlexplainer.editor
 
 import com.github.m1cbppg.sqlexplainer.icons.PluginIcons
 import com.github.m1cbppg.sqlexplainer.sql.SqlSelectionAnalyzer
+import com.github.m1cbppg.sqlexplainer.ui.ExplainPopup
 import com.intellij.codeInsight.hint.HintManager
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -80,19 +81,21 @@ class SelectionIconEditorListener : EditorFactoryListener {
             highlighter.gutterIconRenderer = object : GutterIconRenderer() {
                 override fun getIcon() = PluginIcons.selection
                 override fun getAlignment() = Alignment.LEFT
-                override fun getTooltipText(): String = "检测选中文本是否为 SQL"
+                override fun getTooltipText(): String = "SQL 解释：点击分析选中 SQL"
                 override fun isNavigateAction(): Boolean = true
                 override fun getClickAction(): com.intellij.openapi.actionSystem.AnAction? = object : AnAction("Analyze SQL") {
                     override fun actionPerformed(e: AnActionEvent) {
                         val project = editor.project ?: return
                         val psiFile = PsiDocumentManager.getInstance(project).getPsiFile(editor.document) ?: return
                         val result = SqlSelectionAnalyzer.analyze(editor, psiFile)
-                        val message = if (result.isSql) {
-                            "检测到 SQL 片段：" + result.reason
+                        if (result.isSql) {
+                            val sql = editor.selectionModel.selectedText?.trim() ?: return
+                            // Show streaming popup and start explaining
+                            ExplainPopup.show(project, editor, sql)
                         } else {
-                            "未检测到 SQL 相关内容：" + result.reason
+                            val message = "未检测到 SQL 相关内容：" + result.reason
+                            HintManager.getInstance().showInformationHint(editor, message)
                         }
-                        HintManager.getInstance().showInformationHint(editor, message)
                     }
                 }
                 override fun equals(other: Any?): Boolean = other === this
